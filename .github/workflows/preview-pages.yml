@@ -1,0 +1,72 @@
+name: Deploy fixed PR8 preview (manual only)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fixed-pr8-preview-pages
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.repository == '0857ken/tw-market-scanner-pr8-preview' && github.event.repository.private == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify and extract original CI candidates (no rebuild)
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          Path('landing').mkdir()
+          Path('landing/index.html').write_text('<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><title>PR #8 Safari 測試預覽｜非正式網站</title><style>body{margin:0;background:#0b1423;color:#dce7f3;font:17px/1.7 system-ui,sans-serif}main{max-width:800px;margin:auto;padding:28px max(20px,env(safe-area-inset-right)) 40px}h1{font-size:26px}a{color:#83cbe8;overflow-wrap:anywhere}.button{display:block;padding:16px;border:1px solid #51788f;border-radius:12px;margin:18px 0;text-decoration:none;background:#132235}strong{color:#ffd493}code{overflow-wrap:anywhere;font-size:14px}</style><main><h1>PR #8 獨立 Safari 測試預覽</h1><p><strong>這是測試環境，不是正式網站；行情固定於 2026-10-13，並非最新行情。</strong>沒有每日排程，也沒有正式發布或回復授權。</p><a class="button" href="rc/">開啟 RC 模式測試 →<br>原始 CI observation RC，固定核准資料 SHA</a><a class="button" href="daily/">開啟每日模式測試 →<br>CI 離線 dry-run／舊行情 2026-10-13，非正式成功版本</a><p>每日模式只是驗證 manifest 載入與介面；來源是固定 CI 測試快照，<strong>不是 successfulPointer 正式 baseline，也不是新交易日發布成功</strong>。兩模式原始 HTML／JS／CSS／資料均未修改。</p><p>GitHub Pages 同帳號網站共用 origin，關注清單可能與其他掃描器頁面共用。建議先以 Safari 私密瀏覽測試，避免改動原有關注清單。</p><p>固定 HEAD：<code>bee9f53ef515e837e3ebd160f538f5ea253c22e5</code><br>來源 CI：40646358943；RC Artifact：12797689354；每日證據 Artifact：12798307786。</p><p><a href="preview-inventory.json">查看公開檔案 SHA256</a></p><p>Safari 待驗：320–430px／直橫轉向、底部 safe-area、搜尋鍵盤、100／300／全部、排序及市場篩選、個股抽屜觸控與捲動。VoiceOver 與外接實體鍵盤尚未驗證。</p></main></html>\n',encoding='utf-8')
+          Path('landing/.nojekyll').write_bytes(b'')
+          """Extract exact fixed CI ZIPs; never build or update market data."""
+          import hashlib,json,re,zipfile
+          from pathlib import Path
+          HEAD='bee9f53ef515e837e3ebd160f538f5ea253c22e5'
+          SPECS={
+           'rc':('7110129c44a27394f1531e6829f00314f47992e41bbb8a6f0870c38ffb6060ad','b3b92177ca841afc102f4a4f80e0962c764f62d872458abfdab4add90d4ef95e','bd5c0630bc3424e7c20aed05cf1f8801af90e34bd27563a9743615b907b1d7f9'),
+           'daily':('8d8fa7cc88762b1985807e11fcb479abab94cc1810d2bc717991396dbb4482c3','4cfb16ce7de2060910fcc38face9bd50ec09ae3dbd34c234be5dbb901b838bb8','e5a8f6fc730814387e2b36db61ca9f92fce53403782b228f070b05af8ad35064')}
+          sha=lambda b:hashlib.sha256(b).hexdigest()
+          root=Path('site');root.mkdir(exist_ok=False);inventory={}
+          for mode,(ziphash,mhash,datahash) in SPECS.items():
+           archive=Path('approved-'+mode+'.zip');assert sha(archive.read_bytes())==ziphash
+           with zipfile.ZipFile(archive) as z:
+            names=z.namelist();assert len(names)==len(set(names))==8
+            assert all(n in ['index.html','.nojekyll','market.json','release-manifest.json'] or re.fullmatch(r'assets/[A-Za-z0-9_.-]+\.(js|css)',n) for n in names)
+            assert all((i.external_attr>>16)&0o170000!=0o120000 for i in z.infolist());assert sum(i.file_size for i in z.infolist())<12*1024*1024
+            files={n:z.read(n) for n in names};assert sha(files['release-manifest.json'])==mhash;assert sha(files['market.json'])==datahash
+            m=json.loads(files['release-manifest.json']);assert set(files)==set(m['assets'])|{'release-manifest.json'}
+            assert m['asOf']=='2026-10-13' and m['profile']=='observation-only' and m['strategyComplete'] is False and m['deploymentAuthorized'] is False
+            if mode=='rc':assert m['candidateCommit']==HEAD and m['localTreeDirty'] is False
+            else:assert m['processorCommit']==HEAD and m['runId']=='ci-fixture-40646358943' and m['productionBaselineVerified'] is False and m['releaseKind']=='daily-observation-dry-run'
+            for n,b in files.items():
+             if n in m['assets']:assert sha(b)==m['assets'][n]
+             path=root/mode/n;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b);inventory[mode+'/'+n]={'sha256':sha(b),'bytes':len(b)}
+          for n in ['index.html','.nojekyll']:
+           b=Path('landing/'+n).read_bytes();(root/n).write_bytes(b);inventory[n]={'sha256':sha(b),'bytes':len(b)}
+          (root/'preview-inventory.json').write_text(json.dumps({'sourceHead':HEAD,'sourceRun':40646358943,'environment':'ISOLATED TEST PREVIEW ONLY','marketDate':'2026-10-13','productionAuthorized':False,'files':inventory},ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps({'verified':True,'sourceHead':HEAD,'files':len(inventory),'rebuild':False,'productionAuthorized':False}))
+          PY
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
+        with:
+          path: site/
+          include-hidden-files: true
+          retention-days: 1
+  deploy:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346
+        with:
+          error_count: 1
